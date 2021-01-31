@@ -1,0 +1,171 @@
+---
+title: "DE analysis RNA-seq"
+output: html_document
+layout : topic
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, ECHO=FALSE}
+library(DESeq2)
+library(edgeR)
+library(limma)
+library(Biobase)
+load('bottomly_eset.RData')
+
+```
+Basically we want to know the relationship between mean and variance change as we increase the replicates. How do we know that. 
+This fullset actually contains 2 different mouse strains C57BI and DBA with 10 and 11 replicates respectively. So now we are creating another datset with 5 replicates for each strain (n = 10) and 2 replicates for each strain (n = 4) 
+
+These two datasets are included in the data as bottomly.2reps and bottomly.5reps respectively.
+
+Note: Pch is basically the shape or pointer that you want in the plot
+```{r}
+eset_2 <- bottomly.2reps
+cpm.mat <- log(cpm(exprs(eset_2)))
+mean_vec <- apply(cpm.mat, 1, mean)
+sdvec <- apply(cpm.mat, 1 , sd)
+plot(mean_vec, sdvec, pch = ".", main = "2 replicates", ylab= "sd", xlab= "Avg log(CPM)")
+
+```
+
+Now for the 5 replicates dataset
+```{r}
+eset_5 <- bottomly.5reps
+cpm.mat <- log(cpm(exprs(eset_5)))
+mean_vec <- apply(cpm.mat, 1, mean)
+sdvec <- apply(cpm.mat, 1 , sd)
+plot(mean_vec, sdvec, pch = ".", main = "5 replicates", ylab= "sd", xlab= "Avg log(CPM)")
+```
+
+Now for the entire dataset that is 10 replicates.
+
+```{r}
+eset <- bottomly.eset
+cpm.mat <- log(cpm(exprs(eset)))
+mean_vec <- apply(cpm.mat, 1, mean)
+sdvec <- apply(cpm.mat, 1 , sd)
+plot(mean_vec, sdvec, pch = ".", main = "10 replicates", ylab= "sd", xlab= "Avg log(CPM)")
+```
+
+so basically what you observe is that the data gets less and less scattered when the replicates increase. The replicates are the number of sample. So as the samples increases the data gets less and less scattered.
+The less scatter means that the deviation is less. so it means the standard deviation decreses as the samples increases. This is basically called "Heteroscedastity"
+
+
+RNA seq data has a lot of Heteroscadasticity. SO how do we work with these data. What is a proper model for this. Now this is where DESeq2 and edgeR comes into picture.
+ 
+##DESeq2
+
+The first thing is to create a DESeq2 dataset object and then perform the analysis.
+
+```{r, warning=FALSE, message=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = exprs(bottomly.eset), colData = pData(bottomly.eset), 
+design = ~ strain )
+dds <- DESeq(dds)
+```
+
+Plot dispersion estimates
+```{r, fig.align='center'}
+plotDispEsts(dds)
+```
+
+# edgeR
+
+It is also similar to DESeq2 that is it borrrows information from the expression dataset. The only difference is that it the common dispersion is first estimated for all the tags and empirical base strategy is applied for sqeezing the tag wise dispersion towards the common dispersion.
+
+edgeR uses BCV values. The dispersion is obtained by taking these values and squaring these values.
+SImilar to DESeq2, edgeR also we have to create a object. It is called DGE object.
+
+```{r}
+dge <- DGEList(counts = exprs(bottomly.eset), group = pData(bottomly.eset)$strain)
+#Normalize by total count
+dge <- calcNormFactors(dge)
+
+```
+
+The normalization methods are different for DESeq2 and edgeR. DESeq2 uses the meadian of ration method where as edgeR uses tmm normalization method.
+
+
+THe next part is creating contrast matrix. This is basically specifying the samples that we want to compare one another. 
+Note: Remember, you had a lot of confusion regarding this? YOu asked Destiny about this a lot. 
+
+```{r}
+design_matrix <- model.matrix(~ 0 + dge$samples$group)
+colnames(design_matrix) <- levels(dge$samples$group)
+```
+
+estimate dispersion parameters for GLM
+
+```{r}
+# we can actually ignore the common dispersion part and directly go to the trended dispersion. It basically just add the common trend line to the plot.
+dge <- estimateGLMCommonDisp(dge, design_matrix)
+dge <- estimateGLMTrendedDisp(dge, design_matrix, method = "power")
+dge <- estimateGLMTagwiseDisp(dge, design_matrix)
+```
+
+Plot the mean variance
+
+```{r}
+plotBCV(dge)
+```
+
+There is no actual difference between the both of them. Both of them perform equally well. it is basically just a personal preference. 
+
+# Limma voom
+
+Basicallt we use this a lot less. Maybe when the data is too noisy we can try to normalize the data using limma voom.
+```{r}
+#create design matrix
+design <- model.matrix(~ pData(bottomly.eset)$strain)
+#apply voom transformation
+nf <- calcNormFactors(bottomly.eset)
+v <- voom(exprs(bottomly.eset), design, lib.size = colSums(exprs(bottomly.eset))*nf, normalize.method = "quantile", plot = TRUE)
+```
+
+##DE analysis
+
+For now we are using the threshold FDR < 0.05. We are setting this a variable so we dont write everytime we need to use it.
+
+```{r}
+p.threshold <- 0.05
+```
+
+#edgeR
+```{r}
+#changing the deesign matrix column names
+colnames(design_matrix) <- c("C57BL", "DBA")
+#Model fitting
+fit.edgeR <- glmFit(dge, design_matrix)
+#differential expression
+contrasts.edgeR <- makeContrasts(C57BL - DBA, levels = design_matrix)
+lrt.edgeR <- glmLRT(fit.edgeR, contrast = contrasts.edgeR)
+#access result table
+edgeR_results <- lrt.edgeR$table
+sig.edgeR <- decideTestsDGE(lrt.edgeR, adjust.method="BH", p.value = p.threshold)
+genes.edgeR <- row.names(edgeR_results)[which(sig.edgeR != 0)]
+
+```
+
+#DeSeq2
+
+```{r}
+#Pass the names of contrast in form of list
+contrast.deseq2 <- list("strain_DBA.2J_vs_C57BL.6J")
+#To check the names you can use resultsNames(deseq2 object) so in this case it is resultsNamses(dds)
+
+deseq2_results <- results(dds, contrast=contrast.deseq2)
+deseq2_results$threshold <- as.logical(deseq2_results$padj < p.threshold)
+genes.deseq <- row.names(deseq2_results)[which(deseq2_results$threshold)]
+
+```
+
+We can look at how many genese overlapped in between these 2 methods
+
+```{r}
+library(gplots)
+venn(list(edgeR = genes.edgeR, DESeq2 = genes.deseq))
+```
+
